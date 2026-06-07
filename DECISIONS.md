@@ -40,6 +40,7 @@ or chunked. Below are the specific decisions made for each area.
 - Each step reads its input from disk and writes output to disk
 - No step passes data to the next step via memory
 - This means we can resume from any step if needed
+- Files are organized in three folders: uploads/ intermediate/ outputs/
 
 ---
 
@@ -91,9 +92,40 @@ or chunked. Below are the specific decisions made for each area.
 
 **Approach chosen:** Time-based expiry with a background cleanup process.
 
+**Three folder structure:**
+
+    storage/
+    ├── uploads/       ← original uploaded files only
+    ├── intermediate/  ← files produced between pipeline steps
+    └── outputs/       ← final result only (what user downloads)
+
+**Why three folders:**
+- uploads/ — clear record of what the user originally sent
+- intermediate/ — work in progress, safe to inspect for debugging
+- outputs/ — what the user gets back, clean and separate
+
+**File journey:**
+
+    User uploads data.csv
+        → storage/uploads/{uuid}_data.csv
+
+    After transform step:
+        → storage/intermediate/{uuid}_data_transformed.csv
+
+    After convert step:
+        → storage/intermediate/{uuid}_data_transformed.json
+
+    Job completes — final file moved to:
+        → storage/outputs/{uuid}_data_transformed.json
+
 **Input files:** Deleted 24 hours after job completes (success or failure)
-**Intermediate files:** Deleted 24 hours after job completes
+**Intermediate files:** Deleted when job completes (no longer needed)
 **Output files:** Deleted 24 hours after job completes
+
+**Cleanup order:**
+- intermediate/ — first to go, deleted on job completion
+- uploads/ — deleted after retention period (24h default)
+- outputs/ — deleted after retention period (24h default)
 
 **If service crashes:**
 - Files stay on disk (safe — nothing is lost)
