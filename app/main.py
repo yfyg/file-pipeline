@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI):
     # Create storage directories if they don't exist
     os.makedirs("storage/uploads", exist_ok=True)
     os.makedirs("storage/outputs", exist_ok=True)
+    os.makedirs("storage/intermediate", exist_ok=True)
     log.info("Storage directories ready")
 
     # Clean up any leftover temp files from previous crashes

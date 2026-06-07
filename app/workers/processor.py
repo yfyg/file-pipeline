@@ -112,12 +112,43 @@ def process_job(job_id: str):
                 _fail_job(db, job, error, log)
                 return
 
-            # Step succeeded — pass its output to next step
+            # Step succeeded — move output to intermediate/ folder
+            # validate returns same file — no need to move
+            if step_type != "validate" and output_path != current_file_path:
+                import shutil
+                os.makedirs("storage/intermediate", exist_ok=True)
+                intermediate_filename = os.path.basename(output_path)
+                intermediate_path     = os.path.join("storage/intermediate", intermediate_filename)
+                shutil.move(output_path, intermediate_path)
+                output_path = intermediate_path
+                log.info(f"Step output moved to intermediate: {intermediate_path}")
+
+            # Pass output to next step
             current_file_path = output_path
             log.info(f"Step completed — output: {output_path}")
 
         # All steps completed — handle notify if present
         _run_notify_if_present(db, job, pipeline, current_file_path, log)
+
+        # Move final output file to outputs/ folder
+        import shutil
+        output_dir      = "storage/outputs"
+        os.makedirs(output_dir, exist_ok=True)
+        final_filename  = os.path.basename(current_file_path)
+        final_path      = os.path.join(output_dir, final_filename)
+        shutil.move(current_file_path, final_path)
+        current_file_path = final_path
+        log.info(f"Final output moved to: {final_path}")
+
+        # Move final output file to outputs/ folder
+        import shutil
+        output_dir      = "storage/outputs"
+        os.makedirs(output_dir, exist_ok=True)
+        final_filename  = os.path.basename(current_file_path)
+        final_path      = os.path.join(output_dir, final_filename)
+        shutil.move(current_file_path, final_path)
+        current_file_path = final_path
+        log.info(f"Final output moved to: {final_path}")
 
         # Save final output file reference
         output_file = _save_file_reference(db, current_file_path)

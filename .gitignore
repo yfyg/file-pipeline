@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .env
 storage/uploads/*
+storage/intermediate/*
 storage/outputs/*
 *.db
 .DS_Store
