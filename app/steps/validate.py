@@ -7,8 +7,8 @@ MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
 
 def validate(file_path: str, params: dict) -> dict:
     """
-    Validates the file exists, matches expected type, and isn't corrupted.
-    Also enforces 100MB size limit.
+    Validates a file at any point in the pipeline.
+    Can run on original uploads or on converted/transformed output files.
     Returns a result dict with metadata.
     """
     # Check file exists
@@ -25,7 +25,11 @@ def validate(file_path: str, params: dict) -> dict:
         size_in_mb = size / (1024 * 1024)
         raise ValueError(f"File too large: {size_in_mb:.1f}MB. Maximum allowed size is 100MB")
 
-    # Get file extension
+    # Get file extension safely
+    # Works correctly for:
+    #   storage/uploads/abc123_data.csv               -> csv
+    #   storage/outputs/abc123_data_transformed.json  -> json
+    #   storage/outputs/abc123_data.csv.gz            -> gz
     _, ext = os.path.splitext(file_path)
     ext = ext.lstrip(".").lower()
 
@@ -34,12 +38,16 @@ def validate(file_path: str, params: dict) -> dict:
         raise ValueError(f"File type '{ext}' is not allowed. Allowed types: {ALLOWED_TYPES}")
 
     # Check expected type if provided
+    # After conversion this should match the NEW format not the original
     expected_type = params.get("expected_type")
     if expected_type and ext != expected_type.lower():
-        raise ValueError(f"Expected {expected_type} but got {ext}")
+        raise ValueError(
+            f"Expected {expected_type} but got {ext}. "
+            f"If you just ran a convert step make sure expected_type matches the new format."
+        )
 
     # Sample the file to catch obvious corruption
-    # We intentionally don't read the full file to keep memory bounded
+    # We intentionally do not read the full file to keep memory bounded
     _verify_file_content(file_path, ext)
 
     return {
@@ -54,6 +62,7 @@ def _verify_file_content(file_path: str, ext: str):
     """
     Read a small sample to catch obvious corruption.
     We intentionally avoid loading the full file into memory.
+    Works on both original uploads and converted/transformed files.
     Deep validation happens row-by-row during actual processing.
     """
     try:

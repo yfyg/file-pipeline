@@ -1,7 +1,7 @@
 # Design Decisions
 
 ## Summary of Approach
-This pipeline is built with one core principle: **never load a full file into memory**.
+This pipeline is built with one core principle: never load a full file into memory.
 Files can be up to 100MB, so every read, transform, and write operation is streamed
 or chunked. Below are the specific decisions made for each area.
 
@@ -227,3 +227,71 @@ If no match at all
 - SQLite has write locking issues under concurrent load
 - Multiple workers writing job status simultaneously can cause contention
 - PostgreSQL handles this cleanly and is the right choice for production
+
+---
+
+## 11. Validation After Conversion
+
+**Question:** Should we re-run validation after a convert step?
+
+**Answer:** Two separate concerns:
+
+**User-defined validation (explicit pipeline step):**
+- The validate step is user-controlled
+- If user wants to validate after convert they add a second validate step
+- Example: validate(csv) → convert → validate(json) → compress
+- We never force or auto-insert validate steps
+
+**Internal sanity check (automatic after every step):**
+- After every step the worker checks the output file:
+  - File exists on disk
+  - File is not empty
+- This is lightweight — not a full validation
+- Catches cases where a step silently failed to produce output
+- Runs automatically regardless of pipeline definition
+
+**Why this separation:**
+- Keeps the pipeline predictable — user sees exactly what runs
+- Internal check is a safety net, not a business rule
+- User validation rules (expected_type etc.) are intentional choices
+
+---
+
+## 12. Recommended Pipeline Pattern
+
+**We recommend always running validate after convert:**
+
+validate (original type)
+  → transform
+    → convert
+      → validate (new type)   <- recommended
+        → compress
+          → notify
+
+**Why:**
+- Convert changes the file format completely
+- The new file is essentially a new file — should be validated fresh
+- Catches conversion errors early before compress or other steps run
+- If validate fails after convert it means conversion produced bad output
+
+**Example pipeline with recommended pattern:**
+{
+  "pipeline": [
+    {"step": "validate",  "params": {"expected_type": "csv"}},
+    {"step": "transform", "params": {"select_columns": ["name", "email"]}},
+    {"step": "convert",   "params": {"output_format": "json"}},
+    {"step": "validate",  "params": {"expected_type": "json"}},
+    {"step": "compress",  "params": {"algorithm": "gzip"}},
+    {"step": "notify",    "params": {"webhook_url": "https://..."}}
+  ]
+}
+
+**Important — expected_type must match the converted format:**
+- After CSV to JSON conversion: expected_type should be "json"
+- After JSON to CSV conversion: expected_type should be "csv"
+- Passing wrong expected_type will correctly fail the job
+
+**User is in control:**
+- Validation after convert is a recommendation not enforced by the system
+- User can skip it if they trust the conversion output
+- System will still run the internal lightweight sanity check regardless

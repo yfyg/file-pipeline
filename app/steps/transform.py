@@ -30,7 +30,8 @@ def _transform_csv(file_path: str, params: dict) -> str:
     filter_rows    = params.get("filter_rows")
     text_transform = params.get("text_transform")
 
-    output_path = file_path.replace(".csv", "_transformed.csv")
+    base = os.path.splitext(file_path)[0]  # safe extension handling
+    output_path = base + "_transformed.csv"
 
     with open(file_path, "r") as infile, open(output_path, "w", newline="") as outfile:
         reader = csv.DictReader(infile)
@@ -77,15 +78,14 @@ def _transform_json(file_path: str, params: dict) -> str:
     select_fields  = params.get("select_columns")
     text_transform = params.get("text_transform")
 
-    output_path = file_path.replace(".json", "_transformed.json")
+    base = os.path.splitext(file_path)[0]  # safe extension handling
+    output_path = base + "_transformed.json"
 
     with open(file_path, "rb") as infile, open(output_path, "w") as outfile:
         outfile.write("[\n")
         first = True
 
-        # ijson.items yields one complete object at a time
         for item in ijson.items(infile, "item"):
-
             # Select fields
             if select_fields:
                 item = {k: v for k, v in item.items() if k in select_fields}
