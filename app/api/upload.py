@@ -196,7 +196,7 @@ async def upload_file(
             "status":   "PENDING",
             "filename": original_filename,
             "size":     total_size,
-            "message":  "File uploaded successfully. Use /jobs/{job_id} to track progress."
+            "message":  f"File uploaded successfully. Use /jobs/{job.id} to track progress."
         }
 
     except HTTPException:

@@ -15,6 +15,7 @@ class FileReference(Base):
     original_filename = Column(String, nullable=False)
     size = Column(Integer, nullable=False)
     content_type = Column(String, nullable=False)
+    file_hash = Column(String, nullable=True)  # MD5 hash for duplicate detection
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
 
@@ -26,7 +27,7 @@ class Job(Base):
     input_file_id = Column(String, ForeignKey("file_references.id"), nullable=False)
     output_file_id = Column(String, ForeignKey("file_references.id"), nullable=True)
     pipeline = Column(JSON, nullable=False)
-    status = Column(String, default="PENDING")  # PENDING, PROCESSING, COMPLETED, FAILED, CANCELLED
+    status = Column(String, default="PENDING")
     current_step_index = Column(Integer, default=0)
     error_message = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -46,7 +47,7 @@ class JobStep(Base):
     step_index = Column(Integer, nullable=False)
     step_type = Column(String, nullable=False)
     parameters = Column(JSON, nullable=True)
-    status = Column(String, default="PENDING")  # PENDING, RUNNING, COMPLETED, FAILED, SKIPPED
+    status = Column(String, default="PENDING")
     input_file_id = Column(String, ForeignKey("file_references.id"), nullable=True)
     output_file_id = Column(String, ForeignKey("file_references.id"), nullable=True)
     error_message = Column(String, nullable=True)
