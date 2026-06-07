@@ -141,16 +141,6 @@ def process_job(job_id: str):
         current_file_path = final_path
         log.info(f"Final output moved to: {final_path}")
 
-        # Move final output file to outputs/ folder
-        import shutil
-        output_dir      = "storage/outputs"
-        os.makedirs(output_dir, exist_ok=True)
-        final_filename  = os.path.basename(current_file_path)
-        final_path      = os.path.join(output_dir, final_filename)
-        shutil.move(current_file_path, final_path)
-        current_file_path = final_path
-        log.info(f"Final output moved to: {final_path}")
-
         # Save final output file reference
         output_file = _save_file_reference(db, current_file_path)
         job.output_file_id  = output_file.id
