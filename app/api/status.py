@@ -82,7 +82,6 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
                 "index":      step.step_index,
                 "type":       step.step_type,
                 "status":     step.status,
-                "progress":   f"{step.progress}%",
                 "error":      step.error_message,
                 "started_at": step.started_at,
                 "completed_at": step.completed_at,

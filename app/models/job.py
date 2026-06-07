@@ -18,6 +18,7 @@ class FileReference(Base):
     file_hash = Column(String, nullable=True)  # MD5 hash for duplicate detection
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)  # soft delete — set when expiry cleanup removes the file from disk
 
 
 class Job(Base):
@@ -51,7 +52,6 @@ class JobStep(Base):
     input_file_id = Column(String, ForeignKey("file_references.id"), nullable=True)
     output_file_id = Column(String, ForeignKey("file_references.id"), nullable=True)
     error_message = Column(String, nullable=True)
-    progress = Column(Float, default=0.0)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     duration = Column(Float, nullable=True)

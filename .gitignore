@@ -8,3 +8,4 @@ storage/intermediate/*
 storage/outputs/*
 *.db
 .DS_Store
+.idea/

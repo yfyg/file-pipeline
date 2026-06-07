@@ -42,6 +42,13 @@ STEP_FUNCTIONS = {
     "compress":   compress,
 }
 
+# Only transient errors are worth retrying. OSError covers temporary disk-write
+# failures, file locks, and similar I/O issues. Logical errors (bad format,
+# validation failure, unsupported conversion, empty output) raise ValueError and
+# are deterministic — retrying them cannot succeed and only wastes time, so we
+# fail fast on those.
+RETRYABLE_EXCEPTIONS = (OSError,)
+
 
 def process_job(job_id: str):
     """
@@ -89,6 +96,16 @@ def process_job(job_id: str):
             params    = step_def.get("params", {})
             log       = _make_logger(job_id, f"{index}:{step_type}")
 
+            # Honor cooperative cancellation requested via the API mid-flight.
+            # The /cancel endpoint runs in a separate DB session, so re-read the
+            # row before each step. We cannot interrupt a step that is already
+            # running, but we stop cleanly before starting the next one.
+            db.refresh(job)
+            if job.status == "CANCELLED":
+                log.info("Cancellation detected — stopping before next step")
+                _skip_remaining_steps(db, job, pipeline, index)
+                return
+
             # Skip notify — handled separately at the end
             if step_type == "notify":
                 log.info("Notify step deferred to end of pipeline")
@@ -98,22 +115,9 @@ def process_job(job_id: str):
             job.current_step_index = index
             db.commit()
 
-            # Get or create JobStep record
-            job_step = db.query(JobStep).filter(
-                JobStep.job_id == job_id,
-                JobStep.step_index == index
-            ).first()
-
-            if not job_step:
-                job_step = JobStep(
-                    job_id      = job_id,
-                    step_index  = index,
-                    step_type   = step_type,
-                    parameters  = params,
-                    status      = "PENDING"
-                )
-                db.add(job_step)
-                db.commit()
+            # Get the JobStep created at upload time (or create it if missing).
+            # Always reuse the existing row — never insert a duplicate.
+            job_step = _get_or_create_step(db, job_id, index, step_type, params)
 
             # Run the step with retries
             success, output_path, error = _run_step_with_retries(
@@ -142,9 +146,26 @@ def process_job(job_id: str):
                 output_path = intermediate_path
                 log.info(f"Step output moved to intermediate: {intermediate_path}")
 
+                # Update FileReference.storage_path to reflect the new location
+                # Without this, cleanup can't find the file in storage/intermediate/
+                if job_step.output_file_id:
+                    file_ref = db.query(FileReference).filter(
+                        FileReference.id == job_step.output_file_id
+                    ).first()
+                    if file_ref:
+                        file_ref.storage_path = intermediate_path
+                        db.commit()
+
             # Pass output to next step
             current_file_path = output_path
             log.info(f"Step completed — output: {output_path}")
+
+        # Final cancellation guard — if the job was cancelled while the last
+        # step ran, don't fire the webhook or overwrite CANCELLED with COMPLETED.
+        db.refresh(job)
+        if job.status == "CANCELLED":
+            log.info("Cancellation detected after final step — not completing")
+            return
 
         # All steps completed — handle notify if present
         _run_notify_if_present(db, job, pipeline, current_file_path, log)
@@ -155,9 +176,18 @@ def process_job(job_id: str):
         os.makedirs(output_dir, exist_ok=True)
         final_filename  = os.path.basename(current_file_path)
         final_path      = os.path.join(output_dir, final_filename)
-        shutil.move(current_file_path, final_path)
+
+        # If no step produced a new file (e.g. a validate-only pipeline),
+        # current_file_path is still the original upload. Copy it instead of
+        # moving — moving would remove the input from uploads/ and orphan the
+        # input FileReference, destroying the source file.
+        if os.path.realpath(current_file_path) == os.path.realpath(input_file.storage_path):
+            shutil.copy2(current_file_path, final_path)
+            log.info(f"Final output copied, input preserved: {final_path}")
+        else:
+            shutil.move(current_file_path, final_path)
+            log.info(f"Final output moved to: {final_path}")
         current_file_path = final_path
-        log.info(f"Final output moved to: {final_path}")
 
         # Save final output file reference
         output_file = _save_file_reference(db, current_file_path)
@@ -166,6 +196,10 @@ def process_job(job_id: str):
         job.completed_at    = datetime.utcnow()
         db.commit()
         log.info("Job completed successfully")
+
+        # Clean up intermediate files immediately after job completes
+        # DECISIONS §4: intermediate files deleted on job completion
+        _cleanup_intermediate_files(job_id, db, log)
 
     except Exception as e:
         log.error(f"Unexpected error: {str(e)}")
@@ -177,23 +211,29 @@ def process_job(job_id: str):
 
 def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
     """
-    Runs a single step with up to MAX_RETRIES attempts.
-    Returns (success, output_path, error_message)
+    Runs a single step, retrying only on transient errors.
+
+    Retries (up to MAX_RETRIES, with exponential backoff) are attempted only for
+    RETRYABLE_EXCEPTIONS — transient OS/I/O problems. Deterministic failures
+    (bad format, validation failure, unsupported conversion, empty output) raise
+    ValueError and are NOT retried, since retrying cannot help and only wastes
+    time. Returns (success, output_path, error_message).
     """
     step_fn = STEP_FUNCTIONS.get(step_type)
     if not step_fn:
         return False, None, f"Unknown step type: {step_type}"
+
+    # Record the real start once so duration spans all attempts, not just the
+    # last one. (Previously started_at was overwritten on every retry.)
+    job_step.status     = "RUNNING"
+    job_step.started_at = datetime.utcnow()
+    db.commit()
 
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             log.info(f"Attempt {attempt}/{MAX_RETRIES}")
-
-            # Mark step as RUNNING
-            job_step.status     = "RUNNING"
-            job_step.started_at = datetime.utcnow()
-            db.commit()
 
             # Run the step
             output_path = step_fn(file_path, params)
@@ -213,18 +253,26 @@ def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
             return True, output_path, None
 
         except Exception as e:
-            last_error = str(e)
-            log.warning(f"Attempt {attempt} failed: {last_error}")
+            last_error   = str(e)
+            is_retryable = isinstance(e, RETRYABLE_EXCEPTIONS)
 
-            if attempt < MAX_RETRIES:
+            if is_retryable and attempt < MAX_RETRIES:
                 wait = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
-                log.info(f"Retrying in {wait}s...")
+                log.warning(f"Attempt {attempt} failed (transient): {last_error} — retrying in {wait}s")
                 time.sleep(wait)
+                continue
 
-    # All retries exhausted
+            # Permanent error, or retries exhausted — stop trying
+            reason = "retries exhausted" if is_retryable else "permanent error, not retrying"
+            log.warning(f"Attempt {attempt} failed ({reason}): {last_error}")
+            break
+
+    # Step failed for good
     job_step.status        = "FAILED"
     job_step.error_message = last_error
     job_step.completed_at  = datetime.utcnow()
+    if job_step.started_at:
+        job_step.duration  = (job_step.completed_at - job_step.started_at).total_seconds()
     db.commit()
 
     return False, None, last_error
@@ -250,15 +298,10 @@ def _run_notify_if_present(db, job, pipeline, final_file_path, log):
         params = step_def.get("params", {})
         log    = _make_logger(job.id, f"{index}:notify")
 
-        job_step = JobStep(
-            job_id     = job.id,
-            step_index = index,
-            step_type  = "notify",
-            parameters = params,
-            status     = "RUNNING",
-            started_at = datetime.utcnow()
-        )
-        db.add(job_step)
+        # Reuse the JobStep created at upload time — do NOT insert a duplicate.
+        job_step = _get_or_create_step(db, job.id, index, "notify", params)
+        job_step.status     = "RUNNING"
+        job_step.started_at = datetime.utcnow()
         db.commit()
 
         try:
@@ -298,20 +341,45 @@ def _fail_job(db, job, error_message: str, log):
     log.error(f"Job failed: {error_message}")
 
 
+def _get_or_create_step(db, job_id, index, step_type, params):
+    """
+    Returns the existing JobStep for this (job, step_index) — normally the row
+    created at upload time — or creates one if it is somehow missing.
+
+    Using this everywhere (main loop, notify, skip) guarantees a single row per
+    step index. Previously notify and skip inserted fresh rows that already
+    existed, producing duplicate steps and a wrong overall_progress percentage.
+    """
+    job_step = db.query(JobStep).filter(
+        JobStep.job_id == job_id,
+        JobStep.step_index == index
+    ).first()
+
+    if not job_step:
+        job_step = JobStep(
+            job_id     = job_id,
+            step_index = index,
+            step_type  = step_type,
+            parameters = params,
+            status     = "PENDING",
+        )
+        db.add(job_step)
+        db.commit()
+
+    return job_step
+
+
 def _skip_remaining_steps(db, job, pipeline, from_index: int):
     """
-    Marks all remaining steps as SKIPPED after a failure.
+    Marks all remaining steps as SKIPPED (after a failure or a cancellation).
+    Reuses the existing step rows — never inserts duplicates.
     """
     for index in range(from_index, len(pipeline)):
         step_def = pipeline[index]
-        job_step = JobStep(
-            job_id     = job.id,
-            step_index = index,
-            step_type  = step_def.get("step"),
-            parameters = step_def.get("params", {}),
-            status     = "SKIPPED"
+        job_step = _get_or_create_step(
+            db, job.id, index, step_def.get("step"), step_def.get("params", {})
         )
-        db.add(job_step)
+        job_step.status = "SKIPPED"
     db.commit()
 
 
@@ -347,6 +415,55 @@ def _save_file_reference(db, file_path: str) -> FileReference:
     db.add(file_ref)
     db.commit()
     return file_ref
+
+
+def _cleanup_intermediate_files(job_id: str, db, log):
+    """
+    Deletes intermediate files for this job immediately after completion.
+    DECISIONS §4: intermediate files deleted on job completion — not at startup.
+
+    Strategy:
+    - Find all JobStep output file references for this job
+    - If the file path is inside storage/intermediate/ — delete from disk and DB
+    - Skip final output (already moved to storage/outputs/)
+    - Wrapped in try/except — cleanup failure never fails the job
+    """
+    try:
+        intermediate_dir = os.path.realpath("storage/intermediate")
+
+        # Get all JobStep records for this job
+        steps = db.query(JobStep).filter(JobStep.job_id == job_id).all()
+
+        for step in steps:
+            if not step.output_file_id:
+                continue
+
+            file_ref = db.query(FileReference).filter(
+                FileReference.id == step.output_file_id
+            ).first()
+
+            if not file_ref:
+                continue
+
+            # Only delete files inside storage/intermediate/
+            file_abs = os.path.realpath(file_ref.storage_path)
+            if not file_abs.startswith(intermediate_dir):
+                continue
+
+            # Delete from disk
+            if os.path.exists(file_ref.storage_path):
+                os.remove(file_ref.storage_path)
+                log.info(f"Deleted intermediate file: {file_ref.storage_path}")
+
+            # Delete DB record
+            db.delete(file_ref)
+
+        db.commit()
+        log.info(f"Intermediate cleanup complete for job {job_id}")
+
+    except Exception as e:
+        # Cleanup failure must never fail the job
+        log.warning(f"Intermediate cleanup failed (non-fatal): {str(e)}")
 
 
 def _make_logger(job_id: str, step: str):

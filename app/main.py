@@ -116,6 +116,10 @@ def _cleanup_expired_files():
         ).all()
 
         for file_ref in expired_files:
+            # Skip rows we already soft-deleted in a previous sweep
+            if file_ref.deleted_at is not None:
+                continue
+
             # Delete from disk
             if os.path.exists(file_ref.storage_path):
                 try:
@@ -124,8 +128,14 @@ def _cleanup_expired_files():
                 except Exception as e:
                     log.warning(f"Could not delete expired file: {str(e)}")
 
+            # Soft delete — preserves audit history while preventing
+            # duplicate detection from returning a job whose file is gone.
+            # Hard delete would break foreign keys from Job.input_file_id etc.
+            file_ref.deleted_at = now
+
         if expired_files:
-            log.info(f"Cleaned up {len(expired_files)} expired files")
+            db.commit()
+            log.info(f"Cleaned up {len(expired_files)} expired files (soft-deleted)")
 
         # Mark stuck jobs as FAILED
         # Any job stuck in PENDING or PROCESSING for more than 1 hour

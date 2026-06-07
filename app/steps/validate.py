@@ -55,8 +55,10 @@ def _verify_file_content(file_path: str, ext: str):
         elif ext == "csv":
             with open(file_path, "r") as f:
                 reader = csv.reader(f)
-                next(reader)
-                next(reader, None)
+                header = next(reader, None)  # safe — returns None instead of raising StopIteration
+                if header is None:
+                    raise ValueError("CSV file has no content at all")
+                next(reader, None)  # data row — None if header-only, that is valid
 
         else:
             with open(file_path, "rb") as f:

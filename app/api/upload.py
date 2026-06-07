@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import hashlib
 import shutil
@@ -73,9 +74,15 @@ async def upload_file(
                 detail=f"File type '{ext}' not allowed. Allowed types: {ALLOWED_TYPES}"
             )
 
+        # Sanitize the name used for ON-DISK paths. The raw client filename is
+        # never trusted in a filesystem path — a name like "../../etc/evil.csv"
+        # would otherwise traverse out of storage/uploads. The raw
+        # original_filename is still stored in the DB for display (Step 6).
+        safe_name = _sanitize_filename(original_filename)
+
         # Step 3 — Stream file to temp location in 8KB chunks
         # Temp path used so partial uploads never reach permanent storage
-        temp_filename = f"tmp_{uuid.uuid4()}_{original_filename}"
+        temp_filename = f"tmp_{uuid.uuid4()}_{safe_name}"
         temp_path     = os.path.join(UPLOAD_DIR, temp_filename)
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -107,8 +114,12 @@ async def upload_file(
         log.info(f"File streamed to temp: {temp_path} size={total_size} hash={file_hash}")
 
         # Step 4 — Check for duplicates (filename OR hash)
+        # Soft-deleted rows (deleted_at is not None) are skipped — their disk files
+        # are gone, so matching against them would return a job_id with no result.
+        # The history rows stay in the DB for audit purposes.
         if not allow_duplicate:
             existing_file = db.query(FileReference).filter(
+                FileReference.deleted_at.is_(None),
                 or_(
                     FileReference.original_filename == original_filename,
                     FileReference.file_hash         == file_hash
@@ -133,7 +144,7 @@ async def upload_file(
                 }
 
         # Step 5 — Move from temp to permanent location
-        final_filename = f"{uuid.uuid4()}_{original_filename}"
+        final_filename = f"{uuid.uuid4()}_{safe_name}"
         final_path     = os.path.join(UPLOAD_DIR, final_filename)
         shutil.move(temp_path, final_path)
         temp_path = None  # no longer temp — don't delete on error
@@ -224,3 +235,23 @@ def _get_content_type(ext: str) -> str:
         "txt":  "text/plain",
     }
     return content_types.get(ext, "application/octet-stream")
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    Returns a filesystem-safe version of a client-supplied filename for use in
+    on-disk paths (path-traversal protection).
+
+    - Strips any directory components a client may have sent, handling both
+      POSIX ("../../x") and Windows ("..\\..\\x") separators.
+    - Replaces anything outside a conservative whitelist with "_".
+    - Guards against names that are empty or only dots after sanitizing.
+
+    The raw filename is still stored in the DB for display — only the on-disk
+    name is sanitized. Uniqueness on disk comes from the UUID prefix, so this
+    name only needs to be safe, not unique.
+    """
+    name = os.path.basename(name.replace("\\", "/"))
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    name = name.lstrip(".") or "file"
+    return name
