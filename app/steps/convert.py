@@ -32,7 +32,7 @@ def _csv_to_json(file_path: str) -> str:
     Reads one row at a time — memory usage is size of one row.
     Output: [{col1: val1, col2: val2}, ...]
     """
-    output_path = file_path.replace(".csv", ".json")
+    output_path = os.path.splitext(file_path)[0] + ".json"
 
     with open(file_path, "r") as infile, open(output_path, "w") as outfile:
         reader = csv.DictReader(infile)
@@ -56,7 +56,7 @@ def _json_to_csv(file_path: str) -> str:
     Uses ijson to read one object at a time — memory usage is size of one object.
     Assumption: JSON is an array of flat objects [{...}, {...}]
     """
-    output_path = file_path.replace(".json", ".csv")
+    output_path = os.path.splitext(file_path)[0] + ".csv"
 
     with open(file_path, "rb") as infile:
         # First pass — get headers from first object only

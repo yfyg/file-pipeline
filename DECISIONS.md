@@ -343,12 +343,22 @@ If no match at all
 **Storage safety:**
 - Files are saved on disk as `{uuid}_{sanitized_name}`. The UUID guarantees
   uniqueness (no overwrite even when `allow_duplicate` is true).
-- **Path-traversal protection (Security):** the raw client filename is never
-  used to build a filesystem path. `_sanitize_filename` strips directory
-  components (both POSIX `/` and Windows `\` separators) and whitelists
-  characters, so a malicious name like `../../etc/evil.csv` is reduced to a safe
-  basename and cannot escape `storage/uploads/`. On-disk names are derived only
-  from the sanitized value; uniqueness comes from the UUID.
+- **Path-traversal protection — upload filename (Security):** the raw client
+  filename is never used to build a filesystem path. `_sanitize_filename`
+  strips directory components (both POSIX `/` and Windows `\` separators) and
+  whitelists characters, so a malicious name like `../../etc/evil.csv` is
+  reduced to a safe basename and cannot escape `storage/uploads/`. On-disk
+  names are derived only from the sanitized value; uniqueness comes from the
+  UUID.
+- **Path-traversal protection — Zip Slip (Security):** the `compress` step
+  extracts uploaded `.zip` files, and the paths *inside* a zip are attacker-
+  controlled (a malicious archive can contain entries named
+  `../../etc/passwd`). Before writing any extracted file, `compress._zip_extract`
+  resolves both the storage directory and the proposed output path with
+  `os.path.realpath` and rejects the archive if the resolved output path is
+  not contained inside the storage directory. This blocks the Zip Slip class
+  of attacks where extraction would otherwise write files outside
+  `storage/`.
 - The raw original filename is preserved in the DB for display purposes only —
   it is never used on disk.
 
@@ -568,13 +578,6 @@ what we would do in a production version.
   worker, which marks the job FAILED.
 - *Production:* validate step names (and required params) at upload time and
   return HTTP 400 immediately, so callers get fast, synchronous feedback.
-
-### Output filename derivation in `convert.py`
-- `convert.py` builds output paths with `str.replace(".csv", ".json")` /
-  `.replace(".json", ".csv")`, whereas `transform.py` uses `os.path.splitext`.
-  The `replace` approach is brittle if the substring appears elsewhere in the
-  path. Behaviorally fine for our UUID-prefixed names; we would unify on
-  `splitext` for consistency.
 
 ### Operational / polish notes
 - *Cleanup is startup-only.* The expiry sweep, `tmp_*` removal, and "stuck job →
