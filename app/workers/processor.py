@@ -9,12 +9,30 @@ from app.steps.transform import transform
 from app.steps.convert import convert
 from app.steps.compress import compress
 
-# Structured logging — basic format for root logger
-# job_id and step are added per-message via LoggerAdapter
+# Structured logging setup
+# Root logger uses basic format — safe for RQ internal logs
+# Our processor logger uses extended format with job_id and step context
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+    level  = logging.INFO,
+    format = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 )
+
+# Custom formatter for processor logger only
+# Safely handles missing job_id/step fields (e.g. from RQ internal logs)
+class JobFormatter(logging.Formatter):
+    def format(self, record):
+        record.job_id = getattr(record, "job_id", "unknown")
+        record.step   = getattr(record, "step",   "unknown")
+        return super().format(record)
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(JobFormatter(
+    "%(asctime)s [%(levelname)s] job=%(job_id)s step=%(step)s — %(message)s"
+))
+
+_processor_logger = logging.getLogger("processor")
+_processor_logger.handlers = [_handler]
+_processor_logger.propagate = False  # don't pass to root logger
 
 MAX_RETRIES = 3
 STEP_FUNCTIONS = {
