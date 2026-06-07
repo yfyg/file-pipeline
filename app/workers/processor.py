@@ -9,10 +9,11 @@ from app.steps.transform import transform
 from app.steps.convert import convert
 from app.steps.compress import compress
 
-# Structured logging with job context
+# Structured logging — basic format for root logger
+# job_id and step are added per-message via LoggerAdapter
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] job=%(job_id)s step=%(step)s %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 )
 
 MAX_RETRIES = 3
