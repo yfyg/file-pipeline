@@ -295,3 +295,82 @@ validate (original type)
 - Validation after convert is a recommendation not enforced by the system
 - User can skip it if they trust the conversion output
 - System will still run the internal lightweight sanity check regardless
+
+---
+
+## 14. Why We Use a Database
+
+**The spec does not explicitly say "use a database" but requires:**
+- Persistent job status tracking across restarts
+- Step-level progress and duration tracking
+- File reference management with expiry
+- Query job by ID from the status API
+
+**All of these require durable storage — not just a queue.**
+
+**Why SQLite specifically:**
+- Assignment says "local filesystem is fine for this exercise"
+- No extra Docker service required (unlike PostgreSQL)
+- Data survives service restarts (unlike in-memory dict)
+- Simple to inspect during development (single .db file)
+- Sufficient for single-node use case described in spec
+
+**What we would use in production:**
+- PostgreSQL — handles concurrent writes from multiple workers
+- SQLite has write locking issues under concurrent load
+
+---
+
+## 15. Upload Failure Cleanup
+
+**Three failure scenarios and how we handle them:**
+
+**Scenario 1 — Upload fails midway (network drop):**
+- File is written to a temp path first: storage/uploads/tmp_{uuid}
+- If upload stream fails the temp file is deleted in the except block
+- Final path only assigned after complete successful upload
+
+**Scenario 2 — File saved but DB insert fails:**
+- Wrapped in try/except — temp file deleted on any exception
+- DB record and file are created together or not at all
+
+**Scenario 3 — File + DB saved but queue fails:**
+- Wrapped in try/except — temp file deleted on any exception
+- DB record rolled back if queue fails
+- File and DB record are created together or not at all
+
+**Crash recovery (service dies mid-upload):**
+- Background cleanup job runs on startup
+- Scans for orphan files (file on disk but no DB record) → delete
+- Scans for expired files (older than 24h) → delete
+- Jobs stuck in PENDING more than 1 hour → mark FAILED
+
+**Why temp path first:**
+- Prevents partial files ever reaching permanent storage
+- Clean separation between in-progress and complete uploads
+- Easy to identify and clean up: anything named tmp_ is safe to delete
+
+---
+
+## 16. Output File Retention Period
+
+**Required by spec:**
+- Spec explicitly states: "Results available for configurable retention period (e.g., 24 hours)"
+- 24 hours is the default — not hardcoded
+
+**Why retention periods exist:**
+- Storage costs money — processed files should not sit forever
+- Output files are temporary by nature — user downloads result then done
+- Security — processed files may contain sensitive data
+- Keeping files longer than needed is a liability
+
+**Implementation:**
+- Retention period is configurable via environment variable: RETENTION_HOURS (default: 24)
+- expires_at is set on FileReference record at creation time
+- Background cleanup job checks expires_at and deletes files past expiry
+- Applies to: input files, intermediate files, output files
+
+**What happens after expiry:**
+- File deleted from disk
+- FileReference record marked as expired
+- GET /jobs/{id}/result returns 410 Gone with message "Result expired, please reprocess"
