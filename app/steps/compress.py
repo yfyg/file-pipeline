@@ -57,7 +57,8 @@ def _gzip_decompress(file_path: str) -> str:
     if not file_path.endswith(".gz"):
         raise ValueError(f"Expected .gz file but got: {file_path}")
 
-    output_path = file_path[:-3]  # remove .gz extension
+    # Use splitext to safely remove .gz extension
+    output_path = os.path.splitext(file_path)[0]
 
     with gzip.open(file_path, "rb") as infile, open(output_path, "wb") as outfile:
         while True:
@@ -73,21 +74,31 @@ def _zip_extract(file_path: str) -> str:
     """
     Extracts first file from a zip archive.
     Returns path to the extracted file.
+    Protects against Zip Slip — path traversal attack via malicious zip filenames.
     """
     if not file_path.endswith(".zip"):
         raise ValueError(f"Expected .zip file but got: {file_path}")
 
     output_dir = os.path.dirname(file_path)
+    # Resolve to absolute path — used to detect traversal attempts
+    output_dir_abs = os.path.realpath(output_dir)
 
     with zipfile.ZipFile(file_path, "r") as zip_ref:
-        # Get list of files in zip
         names = zip_ref.namelist()
         if not names:
             raise ValueError("Zip archive is empty")
 
-        # Extract first file only — chunked to avoid memory issues
         target = names[0]
-        output_path = os.path.join(output_dir, target)
+
+        # Resolve the full output path
+        output_path = os.path.realpath(os.path.join(output_dir, target))
+
+        # Zip Slip protection — ensure output is inside our storage folder
+        if not output_path.startswith(output_dir_abs + os.sep):
+            raise ValueError(
+                f"Zip Slip attack detected — "
+                f"file '{target}' would be written outside storage directory"
+            )
 
         with zip_ref.open(target) as infile, open(output_path, "wb") as outfile:
             while True:
