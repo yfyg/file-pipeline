@@ -8,6 +8,7 @@ fastapi==0.136.3
 greenlet==3.5.1
 h11==0.16.0
 idna==3.18
+ijson==3.5.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 python-dateutil==2.9.0.post0
