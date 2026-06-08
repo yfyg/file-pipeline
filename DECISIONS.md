@@ -156,21 +156,17 @@ orphaned. (Moving it would destroy the source and break the input reference.)
 **Soft delete for FileReference rows:**
 
 When the expiry sweep deletes a file from disk, the corresponding `FileReference`
-row is NOT hard-deleted. Instead a `deleted_at` timestamp is set on the row, and
-the duplicate-detection query at upload time filters out any row where
-`deleted_at IS NOT NULL`.
+row is NOT hard-deleted. Instead a `deleted_at` timestamp is set on the row.
 
 **Why soft delete:**
-- Preserves audit history — we can still see what files passed through the system,
-  when they were uploaded, and when they were cleaned up.
+- Preserves audit history — we can still see what files passed through the
+  system, when they were uploaded, and when they were cleaned up. A Job row
+  whose input file has expired can still resolve its `input_file_id` to a
+  (soft-deleted) FileReference row, so the job history stays intact.
 - Avoids breaking foreign keys. `Job.input_file_id`, `Job.output_file_id`, and
   `JobStep.input_file_id` / `output_file_id` all reference `file_references.id`.
   A hard delete would either cascade (losing the job history) or raise an
   IntegrityError. Soft delete sidesteps both problems.
-- Fixes a real UX bug: without it, the duplicate-detection query would match an
-  expired row and return a `job_id` whose result file is already gone from disk,
-  giving the user a confusing "already uploaded" response followed by a 404 on
-  the result download.
 
 **Why not a dedicated history / audit table:**
 
@@ -180,7 +176,6 @@ events like manual deletions, restores, retention-policy changes, etc.). For
 this assignment we deliberately chose the simpler single-column soft-delete:
 - One new nullable column instead of a new table + model + insert path.
 - No need to keep two tables in sync.
-- Same end behavior for the duplicate-detection bug we wanted to fix.
 
 In a real production deployment with compliance / forensics requirements, a
 dedicated history table would be the better choice.
@@ -294,19 +289,16 @@ The `notify` step blocks Server-Side Request Forgery before issuing any request
 
 ## 8. Duplicate Handling
 
-**Three types of duplication considered:**
+**Two types of duplication considered:**
 
-**Type 1 — Duplicate file uploads:**
-- Detected via MD5 hash of file content (streamed 8KB chunks — memory safe)
-- Also checked by original filename
-- Hash and filename stored in FileReference table
+(Duplicate file *uploads* are intentionally not deduplicated — see §9.)
 
-**Type 2 — Duplicate job processing (two workers same job):**
+**Type 1 — Duplicate job processing (two workers picking up the same job):**
 - Prevented by atomically setting status to PROCESSING before starting work
 - Worker checks status == PENDING before proceeding
 - If another worker already set it to PROCESSING the current worker exits immediately
 
-**Type 3 — Duplicate webhook notifications:**
+**Type 2 — Duplicate webhook notifications:**
 - The retry loop stops as soon as one attempt succeeds, so we never POST twice
   on success.
 - An idempotency key (`X-Pipeline-Job-Id`) is sent in the webhook header so the
@@ -315,34 +307,47 @@ The `notify` step blocks Server-Side Request Forgery before issuing any request
 
 ---
 
-## 9. Duplicate Upload Parameter
+## 9. Upload Deduplication — Deliberately Not Implemented
 
-**Approach chosen:** Optional allow_duplicate parameter on upload API (default: false).
+**Approach chosen:** Every upload creates a new job. We do not deduplicate by
+filename, by content, or by pipeline.
 
-**Duplicate detection rule:**
+**Why no dedup:**
 
-If filename matches OR hash matches AND allow_duplicate is false
-    - Reject upload
-    - Return existing job ID
-    - Delete temp file from disk
-    - HTTP 200 — this is not an error, it is idempotent behavior
+Earlier versions of this code matched a new upload against the
+`FileReference` table on filename OR MD5 of content, and returned the existing
+`job_id` if either matched. That looked reasonable at first but missed a real
+case: **the user can re-upload the same file with a different pipeline.**
+Treating that as a duplicate would return the old job whose output was
+shaped by the old pipeline — silently giving the user the wrong result.
 
-If filename matches OR hash matches AND allow_duplicate is true
-    - Accept upload
-    - Create new job
-    - Process normally
+We considered fixing this by including a canonicalized hash of the pipeline
+JSON in the dedup key, but for the scope of this assignment it adds complexity
+without a clear benefit:
+- Storage uniqueness is already guaranteed: every uploaded file lands at
+  `storage/uploads/{uuid}_{sanitized_name}`. The UUID prefix means re-uploading
+  the same filename never overwrites anything on disk.
+- The `job_id` in the upload response gives the user a stable handle to their
+  exact processing run.
+- Skipping dedup keeps the upload path simple and free of subtle "you got
+  someone else's output" failure modes.
 
-If no match at all
-    - Always accept and create new job regardless of allow_duplicate
+**What we would do in production:**
 
-**Why OR logic (filename OR hash):**
-- Same filename, different content — still confusing, treat as duplicate
-- Same content, different filename — same data, no point reprocessing
-- Either condition alone is enough to flag as duplicate
+For a high-volume system where reprocessing is expensive, dedup is worth
+adding — but on the **full** key:
+- Filename (for display / human matching)
+- Content hash (SHA-256, computed while streaming)
+- Canonicalized pipeline definition (sorted keys, normalized whitespace) hash
 
-**Storage safety:**
+Only when all three match should the system return the existing `job_id`.
+Anything less risks returning results that don't match what the user asked
+for.
+
+**Storage safety (still applies):**
+
 - Files are saved on disk as `{uuid}_{sanitized_name}`. The UUID guarantees
-  uniqueness (no overwrite even when `allow_duplicate` is true).
+  uniqueness — nothing on disk is ever overwritten regardless of filename.
 - **Path-traversal protection — upload filename (Security):** the raw client
   filename is never used to build a filesystem path. `_sanitize_filename`
   strips directory components (both POSIX `/` and Windows `\` separators) and

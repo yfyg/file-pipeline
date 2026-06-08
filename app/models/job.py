@@ -15,10 +15,9 @@ class FileReference(Base):
     original_filename = Column(String, nullable=False)
     size = Column(Integer, nullable=False)
     content_type = Column(String, nullable=False)
-    file_hash = Column(String, nullable=True)  # MD5 hash for duplicate detection
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
-    deleted_at = Column(DateTime, nullable=True)  # soft delete — set when expiry cleanup removes the file from disk
+    deleted_at = Column(DateTime, nullable=True)  # soft delete — set when expiry cleanup removes the file from disk (preserves audit history)
 
 
 class Job(Base):

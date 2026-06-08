@@ -1,13 +1,11 @@
 import os
 import re
 import uuid
-import hashlib
 import shutil
 import logging
 from datetime import datetime, timedelta
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 import json
 from redis import Redis
 from rq import Queue
@@ -34,22 +32,23 @@ job_queue = Queue("pipeline", connection=redis_conn)
 
 @router.post("/upload")
 async def upload_file(
-    file:            UploadFile = File(...),
-    pipeline:        str        = Form(...),  # JSON string
-    allow_duplicate: bool       = Form(False),
-    db:              Session    = Depends(get_db)
+    file:     UploadFile = File(...),
+    pipeline: str        = Form(...),  # JSON string
+    db:       Session    = Depends(get_db)
 ):
     """
     Upload a file and start a processing pipeline.
 
     - Streams file to disk in 8KB chunks — never loads full file into memory
-    - Checks file size, type, and duplicate status before accepting
+    - Checks file size and type before accepting
     - Returns job_id immediately — processing happens asynchronously
 
+    Every upload creates a new job. We deliberately do not deduplicate uploads
+    here — see DECISIONS.md §9 for the trade-off.
+
     Parameters:
-        file:            The file to upload
-        pipeline:        JSON string defining processing steps
-        allow_duplicate: If false (default), reject if same filename or hash exists
+        file:     The file to upload
+        pipeline: JSON string defining processing steps
     """
     temp_path = None
 
@@ -87,7 +86,6 @@ async def upload_file(
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
         total_size = 0
-        hasher     = hashlib.md5()
 
         with open(temp_path, "wb") as temp_file:
             while True:
@@ -107,63 +105,30 @@ async def upload_file(
                 # Write chunk to disk
                 temp_file.write(chunk)
 
-                # Update hash incrementally — no extra memory needed
-                hasher.update(chunk)
+        log.info(f"File streamed to temp: {temp_path} size={total_size}")
 
-        file_hash = hasher.hexdigest()
-        log.info(f"File streamed to temp: {temp_path} size={total_size} hash={file_hash}")
-
-        # Step 4 — Check for duplicates (filename OR hash)
-        # Soft-deleted rows (deleted_at is not None) are skipped — their disk files
-        # are gone, so matching against them would return a job_id with no result.
-        # The history rows stay in the DB for audit purposes.
-        if not allow_duplicate:
-            existing_file = db.query(FileReference).filter(
-                FileReference.deleted_at.is_(None),
-                or_(
-                    FileReference.original_filename == original_filename,
-                    FileReference.file_hash         == file_hash
-                )
-            ).first()
-
-            if existing_file:
-                # Find the most recent job for this file
-                existing_job = db.query(Job).filter(
-                    Job.input_file_id == existing_file.id
-                ).order_by(Job.created_at.desc()).first()
-
-                # Delete temp file — we don't need it
-                os.remove(temp_path)
-                temp_path = None
-
-                log.info(f"Duplicate file detected — returning existing job {existing_job.id}")
-                return {
-                    "job_id":  existing_job.id if existing_job else None,
-                    "status":  "already_exists",
-                    "message": "File already uploaded. Use allow_duplicate=true to reprocess."
-                }
-
-        # Step 5 — Move from temp to permanent location
+        # Step 4 — Move from temp to permanent location
+        # Every upload creates a fresh file with a UUID-prefixed name, so nothing
+        # on disk is ever overwritten and no dedup is needed (see DECISIONS §9).
         final_filename = f"{uuid.uuid4()}_{safe_name}"
         final_path     = os.path.join(UPLOAD_DIR, final_filename)
         shutil.move(temp_path, final_path)
         temp_path = None  # no longer temp — don't delete on error
         log.info(f"File moved to permanent storage: {final_path}")
 
-        # Step 6 — Save FileReference to DB
+        # Step 5 — Save FileReference to DB
         file_ref = FileReference(
             storage_path      = final_path,
             original_filename = original_filename,
             size              = total_size,
             content_type      = _get_content_type(ext),
-            file_hash         = file_hash,
             created_at        = datetime.utcnow(),
             expires_at        = datetime.utcnow() + timedelta(hours=RETENTION_HOURS)
         )
         db.add(file_ref)
         db.flush()  # get file_ref.id without full commit yet
 
-        # Step 7 — Create Job record
+        # Step 6 — Create Job record
         job = Job(
             input_file_id = file_ref.id,
             pipeline      = pipeline_def,
@@ -173,7 +138,7 @@ async def upload_file(
         db.add(job)
         db.flush()  # get job.id without full commit yet
 
-        # Step 8 — Create JobStep records for each step
+        # Step 7 — Create JobStep records for each step
         for index, step_def in enumerate(pipeline_def):
             step = JobStep(
                 job_id     = job.id,
@@ -184,7 +149,7 @@ async def upload_file(
             )
             db.add(step)
 
-        # Step 9 — Enqueue job BEFORE committing
+        # Step 8 — Enqueue job BEFORE committing
         # If enqueue fails we roll back DB — file stays but job is not created
         try:
             job_queue.enqueue(
@@ -198,7 +163,7 @@ async def upload_file(
                 detail=f"Failed to enqueue job: {str(e)}"
             )
 
-        # Step 10 — Commit everything together
+        # Step 9 — Commit everything together
         db.commit()
         log.info(f"Job created and enqueued: {job.id}")
 

@@ -92,15 +92,6 @@ Output:
 
 ---
 
-### 6. Upload same file again (override duplicate check)
-
-    curl -X POST http://localhost:8080/upload \
-      -F "file=@/path/to/data.csv" \
-      -F 'pipeline=[{"step":"validate","params":{"expected_type":"csv"}}]' \
-      -F "allow_duplicate=true"
-
----
-
 ## Processing Steps Implemented
 
 | Step      | Description                                                     |
