@@ -4,27 +4,29 @@ import zipfile
 
 CHUNK_SIZE = 8 * 1024  # 8KB per chunk
 
-def compress(file_path: str, params: dict) -> str:
+def compress(file_path: str, params: dict):
     """
     Compresses or decompresses a file.
     Always processed in 8KB chunks — memory never exceeds CHUNK_SIZE.
     Supports: gzip compress, gzip decompress, zip extraction.
-    Returns path to the output file.
+
+    Returns (output_path, stats). compress operates on bytes, not rows,
+    so stats is always {}.
     """
     algorithm = params.get("algorithm", "gzip")
     action = params.get("action", "compress")  # compress or decompress
 
     if algorithm == "gzip":
         if action == "compress":
-            return _gzip_compress(file_path)
+            return _gzip_compress(file_path), {}
         elif action == "decompress":
-            return _gzip_decompress(file_path)
+            return _gzip_decompress(file_path), {}
         else:
             raise ValueError(f"Unknown action: {action}. Use compress or decompress")
 
     elif algorithm == "zip":
         if action == "decompress":
-            return _zip_extract(file_path)
+            return _zip_extract(file_path), {}
         else:
             raise ValueError("zip algorithm only supports decompress for now")
 

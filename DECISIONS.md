@@ -189,9 +189,14 @@ dedicated history table would be the better choice.
 **What we track:**
 - Per job: current step index, overall status, overall % of steps completed
 - Per step: status (PENDING / RUNNING / COMPLETED / FAILED / SKIPPED), start time, end time, duration
+- Per step (row-based steps only): **input_rows** and **output_rows** counted
+  during the streaming loop and saved when the step completes. This answers
+  questions like "how many rows did transform actually filter out?" or "did
+  convert lose any rows?" — after the fact, but exactly. `null` for steps where
+  the concept doesn't apply (validate, compress, notify).
 
 **What we do NOT track:**
-- Within-step row-count progress (e.g. "50% of rows processed")
+- Real-time within-step row-count progress (e.g. "50% of rows processed while running")
 
 **Why this is enough for this system:**
 
@@ -223,6 +228,31 @@ The spec asks for "detailed progress (which step, percentage if available)".
 the job level (% of steps completed). Within-step percentage is explicitly
 qualified "if available" in the spec, and the Critical Implementation Details
 section invites us to document the trade-off here.
+
+**Parallelization caveat (future-proofing):**
+
+The row counts are computed inside the step function and rely on the step
+running in a single process. That is the only mode supported today —
+each Job runs in one RQ worker, and each step runs as one in-process call.
+
+If we later parallelized by splitting a single transform across multiple
+workers (chunked parallel processing), the simple `count += 1` counter would
+no longer be safe. Each worker would have its own counter, and writing
+them back as `JobStep.input_rows += chunk_count` would race in SQLite
+(read-modify-write is not atomic; two workers can each read 0, each compute
++N, and overwrite each other — lost updates).
+
+For that future, the fix would be either:
+- aggregate counts in a single coordinating process after the parallel chunks
+  finish, or
+- use an atomic `UPDATE job_steps SET input_rows = input_rows + N` instead of
+  ORM read-modify-write, or
+- use Redis `INCRBY` as a counter.
+
+The spec only requires parallelism across *independent steps* (Nice to Have),
+not within a step. The current counter is correct for everything the spec
+asks for; this note is here so future maintainers know what needs to change
+if scaling beyond that.
 
 ---
 
@@ -576,6 +606,20 @@ what we would do in a production version.
   is enough), so the job still reports COMPLETED with effectively empty data.
 - *Production:* check requested columns against the header and fail with a clear
   error when a requested column is absent.
+
+### `filter_rows` is a silent no-op when its column was dropped by `select_columns`
+- The transform step applies steps in order: **select → filter → text_transform**
+  (same on both CSV and JSON paths). If a user filters on a column they did not
+  include in `select_columns`, the filter has nothing to test against. In that
+  case `_apply_filter` is not even called; the row passes through unchanged.
+- Net effect: the filter silently does nothing. The job still reports COMPLETED
+  and the output looks identical to a no-filter run.
+- Workaround: include the filter column in `select_columns` (e.g. select
+  `["id","name","email","age"]` if filtering on `age`). The example pipelines
+  in DECISIONS §12 follow this rule.
+- *Production:* either reorder to filter-then-select, or validate at upload time
+  that every column referenced by `filter_rows` also appears in
+  `select_columns` (when both are present), and reject with HTTP 400 otherwise.
 
 ### Unknown step names fail asynchronously, not at upload
 - `/upload` accepts any pipeline JSON whose entries have a `step` field; an

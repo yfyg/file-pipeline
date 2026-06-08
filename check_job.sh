@@ -37,4 +37,9 @@ for step in data['steps']:
             print(f'     Error: {step[\"error\"]}')
         if step.get('duration_seconds'):
             print(f'     Duration: {step[\"duration_seconds\"]}s')
+        # Show row counts when present (transform, convert produce them)
+        if step.get('input_rows') is not None or step.get('output_rows') is not None:
+            in_n  = step.get('input_rows')
+            out_n = step.get('output_rows')
+            print(f'     Rows: {in_n} in -> {out_n} out')
 "

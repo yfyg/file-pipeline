@@ -235,8 +235,9 @@ def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
         try:
             log.info(f"Attempt {attempt}/{MAX_RETRIES}")
 
-            # Run the step
-            output_path = step_fn(file_path, params)
+            # Run the step. Every step returns (output_path, stats).
+            # stats is {} for steps that don't operate on rows (validate, compress).
+            output_path, stats = step_fn(file_path, params)
 
             # Internal sanity check — did step produce a valid output?
             _verify_step_output(output_path)
@@ -248,6 +249,12 @@ def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
                 job_step.completed_at - job_step.started_at
             ).total_seconds()
             job_step.output_file_id = _save_file_reference(db, output_path).id
+
+            # Record row counts if the step produced them (transform, convert).
+            # NULL for non-row steps so the API can show "-" instead of "0".
+            job_step.input_rows  = stats.get("input_rows")
+            job_step.output_rows = stats.get("output_rows")
+
             db.commit()
 
             return True, output_path, None

@@ -79,9 +79,14 @@ async def upload_file(
         # original_filename is still stored in the DB for display (Step 6).
         safe_name = _sanitize_filename(original_filename)
 
+        # Pre-allocate the job_id so we can use it as the on-disk file prefix.
+        # This way the file on disk, the Job row, and the status API all share
+        # one UUID — no second mystery prefix to chase down.
+        job_id = str(uuid.uuid4())
+
         # Step 3 — Stream file to temp location in 8KB chunks
         # Temp path used so partial uploads never reach permanent storage
-        temp_filename = f"tmp_{uuid.uuid4()}_{safe_name}"
+        temp_filename = f"tmp_{job_id}_{safe_name}"
         temp_path     = os.path.join(UPLOAD_DIR, temp_filename)
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -108,9 +113,11 @@ async def upload_file(
         log.info(f"File streamed to temp: {temp_path} size={total_size}")
 
         # Step 4 — Move from temp to permanent location
-        # Every upload creates a fresh file with a UUID-prefixed name, so nothing
-        # on disk is ever overwritten and no dedup is needed (see DECISIONS §9).
-        final_filename = f"{uuid.uuid4()}_{safe_name}"
+        # The job_id (pre-allocated above) is used as the file prefix so the
+        # filename on disk matches the Job.id — easy to correlate when
+        # debugging. Every upload gets a fresh job_id, so nothing on disk is
+        # ever overwritten and no dedup is needed (see DECISIONS §9).
+        final_filename = f"{job_id}_{safe_name}"
         final_path     = os.path.join(UPLOAD_DIR, final_filename)
         shutil.move(temp_path, final_path)
         temp_path = None  # no longer temp — don't delete on error
@@ -129,14 +136,16 @@ async def upload_file(
         db.flush()  # get file_ref.id without full commit yet
 
         # Step 6 — Create Job record
+        # Job.id is the pre-allocated job_id so it matches the file prefix
         job = Job(
+            id            = job_id,
             input_file_id = file_ref.id,
             pipeline      = pipeline_def,
             status        = "PENDING",
             created_at    = datetime.utcnow()
         )
         db.add(job)
-        db.flush()  # get job.id without full commit yet
+        db.flush()
 
         # Step 7 — Create JobStep records for each step
         for index, step_def in enumerate(pipeline_def):

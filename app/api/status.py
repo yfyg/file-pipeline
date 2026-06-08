@@ -86,6 +86,10 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
                 "started_at": step.started_at,
                 "completed_at": step.completed_at,
                 "duration_seconds": step.duration,
+                # Row counts — null for steps that don't operate on rows
+                # (validate, compress). transform / convert populate these.
+                "input_rows":  step.input_rows,
+                "output_rows": step.output_rows,
             }
             for step in steps
         ]

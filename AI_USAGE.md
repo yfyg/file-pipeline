@@ -24,6 +24,8 @@
   then got caught and reported as "File appears corrupted" — the wrong error
   message for a valid input. Fixed by switching to `next(reader, None)` and
   explicitly handling the empty case.
+- json code did not apply filtering - came up in tests
+- Using unique id for job and another one for the output file, while it make sense to use same ids
 
 ---
 

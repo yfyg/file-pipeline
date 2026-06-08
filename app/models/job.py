@@ -54,6 +54,10 @@ class JobStep(Base):
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     duration = Column(Float, nullable=True)
+    # Row counts — only meaningful for row-based steps (transform, convert).
+    # NULL for steps where the concept doesn't apply (validate, compress, notify).
+    input_rows  = Column(Integer, nullable=True)
+    output_rows = Column(Integer, nullable=True)
 
     job = relationship("Job", back_populates="steps")
     input_file = relationship("FileReference", foreign_keys=[input_file_id])

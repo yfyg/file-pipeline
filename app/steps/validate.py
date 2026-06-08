@@ -4,11 +4,13 @@ import csv
 ALLOWED_TYPES = ["csv", "json", "txt", "zip", "gz"]
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB in bytes
 
-def validate(file_path: str, params: dict) -> str:
+def validate(file_path: str, params: dict):
     """
     Validates a file at any point in the pipeline.
     Can run on original uploads or on converted/transformed output files.
-    Returns the same file_path — validate does not produce a new file.
+
+    Returns (file_path, stats). validate does not produce a new file or
+    count rows, so stats is always {}.
     """
     if not os.path.exists(file_path):
         raise ValueError(f"File not found: {file_path}")
@@ -37,7 +39,7 @@ def validate(file_path: str, params: dict) -> str:
     _verify_file_content(file_path, ext)
 
     # Return same file path — validate does not transform the file
-    return file_path
+    return file_path, {}
 
 
 def _verify_file_content(file_path: str, ext: str):
