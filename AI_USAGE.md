@@ -26,7 +26,6 @@ Sonnet did most of the writing; Opus 4.7 did most of the deeper review and trade
 - **JSON code did not apply filtering** — came up in tests. The transform step's CSV path handled `filter_rows`, but the JSON path quietly ignored it. Every row passed through. Caught only after I started writing the test with a known expected row count.
 - **Using a unique id for the job and another one for the output file** — it made more sense to use the same id, so the file on disk, the Job row, and the API response all share one UUID.
 - **Commit before enqueue.** The first version enqueued the job to Redis *before* the DB commit. Under load, a fast worker could pick up the message and look up the Job row before the upload's transaction committed — see "Job not found", silently exit, file orphaned. The independent review caught it. Switched to commit-then-enqueue, with a sweeper that re-enqueues stuck PENDING jobs if the enqueue itself fails. Classic "looks fine in tests, breaks under real concurrency" bug.
-- **Worker's exception handler crashing on its own error path.** If the very first DB lookup at the start of the worker failed, the exception handler referenced a variable that was never set — so the handler itself crashed and the real error was lost. One-line fix (initialize the variable before the try block), but the kind of subtle thing AI happily writes and tests don't catch unless you exercise the early-failure path.
 
 ---
 
