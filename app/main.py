@@ -63,14 +63,52 @@ app.include_router(status_router, tags=["Status"])
 @app.get("/health")
 def health_check():
     """
-    Health check endpoint.
-    Returns service status and current time.
+    Deep health check: pings Redis and the DB so orchestration can tell
+    "process is up" from "process is up but a dependency is down".
+
+    Returns 200 with status="healthy" only when both checks pass.
+    Returns 503 with per-dependency detail when one or more fails.
+    Worth doing here because a shallow "always 200" endpoint fools load
+    balancers into routing traffic to a degraded instance.
     """
-    return {
-        "status":  "healthy",
-        "time":    datetime.utcnow().isoformat(),
-        "service": "file-processing-pipeline"
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    from app.models.database import SessionLocal
+
+    checks = {"redis": "unknown", "db": "unknown"}
+
+    # Redis — quick PING, short timeout so a hung Redis doesn't hang /health
+    try:
+        from redis import Redis
+        redis_conn = Redis(
+            host = os.getenv("REDIS_HOST", "localhost"),
+            port = int(os.getenv("REDIS_PORT", "6379")),
+            socket_connect_timeout = 2,
+            socket_timeout = 2,
+        )
+        redis_conn.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"down: {str(e)[:100]}"
+
+    # DB — trivial SELECT 1 confirms the file is reachable and the schema is up
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as e:
+        checks["db"] = f"down: {str(e)[:100]}"
+    finally:
+        db.close()
+
+    healthy = all(v == "ok" for v in checks.values())
+    body = {
+        "status":   "healthy" if healthy else "unhealthy",
+        "time":     datetime.utcnow().isoformat(),
+        "service":  "file-processing-pipeline",
+        "checks":   checks,
     }
+    return JSONResponse(content=body, status_code=200 if healthy else 503)
 
 
 def _cleanup_temp_files():
@@ -99,12 +137,15 @@ def _cleanup_temp_files():
 
 def _cleanup_expired_files():
     """
-    Deletes files whose retention period has expired.
-    Checks expires_at on FileReference records.
-    Also marks stuck PENDING/PROCESSING jobs as FAILED.
+    Deletes files whose retention period has expired and recovers stuck jobs:
+    - PENDING > 5min → re-enqueue (likely lost by Redis or enqueue failed
+      after the upload commit — work hasn't started so re-running is safe)
+    - PROCESSING > 1h → mark FAILED (worker died mid-pipeline; resuming a
+      half-finished step is out of scope, see DECISIONS §10)
     """
     from app.models.database import SessionLocal
-    from app.models.job import Job, FileReference
+    from app.models.job import FileReference
+    from app.workers.sweeper import recover_stuck_jobs
 
     db = SessionLocal()
     try:
@@ -137,24 +178,8 @@ def _cleanup_expired_files():
             db.commit()
             log.info(f"Cleaned up {len(expired_files)} expired files (soft-deleted)")
 
-        # Mark stuck jobs as FAILED
-        # Any job stuck in PENDING or PROCESSING for more than 1 hour
-        stuck_cutoff = now - timedelta(hours=1)
-        stuck_jobs   = db.query(Job).filter(
-            Job.status.in_(["PENDING", "PROCESSING"]),
-            Job.created_at < stuck_cutoff
-        ).all()
-
-        for job in stuck_jobs:
-            job.status        = "FAILED"
-            job.error_message = "Job timed out — stuck in queue for more than 1 hour"
-            job.completed_at  = now
-            log.warning(f"Marked stuck job as FAILED: {job.id}")
-
-        if stuck_jobs:
-            log.info(f"Marked {len(stuck_jobs)} stuck jobs as FAILED")
-
-        db.commit()
+        # Recover stuck jobs (re-enqueue PENDING, fail PROCESSING)
+        recover_stuck_jobs(db)
 
     except Exception as e:
         log.error(f"Cleanup failed: {str(e)}")

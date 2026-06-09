@@ -15,6 +15,11 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
     """
     Get full status of a job including all step details.
 
+    Self-healing: before returning, sweep for stuck jobs. A PENDING job older
+    than 5 minutes gets re-enqueued (the worker probably missed it). This
+    means users polling /jobs/{id} can recover their own stuck jobs without
+    needing a background scheduler — see DECISIONS §14.
+
     Returns:
         - Overall job status
         - Current step index
@@ -22,6 +27,14 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
         - Output file location when complete
         - Error details if failed
     """
+    # Self-heal: re-enqueue PENDING > 5 min, fail PROCESSING > 1 h.
+    # Wrapped so a sweeper hiccup never breaks the status response.
+    try:
+        from app.workers.sweeper import recover_stuck_jobs
+        recover_stuck_jobs(db)
+    except Exception as e:
+        log.warning(f"Recovery sweep during status query failed (non-fatal): {e}")
+
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")

@@ -98,17 +98,29 @@ def client(app_modules):
     raw = TestClient(app_modules.app)
 
     class DrainingClient:
+        # By default uploads run synchronously (drain immediately after POST).
+        # Set client.auto_drain = False BEFORE the upload to keep jobs PENDING
+        # — useful for testing cancel behavior on a job that hasn't run.
+        auto_drain = True
+
         def post(self, *args, **kwargs):
             response = raw.post(*args, **kwargs)
-            # Drain any jobs queued during the request — by now the upload
-            # has committed, so the worker session can see the Job row.
-            for _, job_id in list(app_modules.pending_jobs):
-                app_modules.processor.process_job(job_id)
-            app_modules.pending_jobs.clear()
+            if self.auto_drain:
+                # Drain any jobs queued during the request — by now the upload
+                # has committed, so the worker session can see the Job row.
+                for _, job_id in list(app_modules.pending_jobs):
+                    app_modules.processor.process_job(job_id)
+                app_modules.pending_jobs.clear()
             return response
 
         def get(self, *args, **kwargs):
             return raw.get(*args, **kwargs)
+
+        def drain(self):
+            """Manually run any queued jobs. For tests that toggle auto_drain off."""
+            for _, job_id in list(app_modules.pending_jobs):
+                app_modules.processor.process_job(job_id)
+            app_modules.pending_jobs.clear()
 
     return DrainingClient()
 

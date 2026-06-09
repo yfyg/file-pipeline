@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY app/ ./app/
 
 # Create storage directories
-RUN mkdir -p storage/uploads storage/outputs
+RUN mkdir -p storage/uploads storage/intermediate storage/outputs
 
 # Expose API port
 EXPOSE 8000

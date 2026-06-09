@@ -58,6 +58,9 @@ def process_job(job_id: str):
     """
     db = SessionLocal()
     log = _make_logger(job_id, "init")
+    # Bind `job` up front so the except-handler's `if job:` check can't raise
+    # UnboundLocalError when the DB query itself fails before assignment.
+    job = None
 
     try:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -85,9 +88,13 @@ def process_job(job_id: str):
             _fail_job(db, job, "Input file not found", log)
             return
 
-        # current_file_path tracks which file to pass to the next step
-        # starts as the uploaded file, updated after each step
+        # current_file_path tracks which file to pass to the next step.
+        # current_file_id tracks the FileReference row that file belongs to,
+        # so we can populate each JobStep.input_file_id with the previous
+        # step's output (per-step traceability — see DECISIONS data model).
+        # Both start at the uploaded file and update after each step.
         current_file_path = input_file.storage_path
+        current_file_id   = input_file.id
 
         # Run each step in order
         pipeline = job.pipeline  # list of {"step": "...", "params": {...}}
@@ -123,6 +130,7 @@ def process_job(job_id: str):
             success, output_path, error = _run_step_with_retries(
                 step_type       = step_type,
                 file_path       = current_file_path,
+                file_id         = current_file_id,
                 params          = params,
                 job_step        = job_step,
                 db              = db,
@@ -156,8 +164,10 @@ def process_job(job_id: str):
                         file_ref.storage_path = intermediate_path
                         db.commit()
 
-            # Pass output to next step
+            # Pass output to next step. The next step's input_file_id
+            # becomes this step's output_file_id.
             current_file_path = output_path
+            current_file_id   = job_step.output_file_id
             log.info(f"Step completed — output: {output_path}")
 
         # Final cancellation guard — if the job was cancelled while the last
@@ -209,9 +219,14 @@ def process_job(job_id: str):
         db.close()
 
 
-def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
+def _run_step_with_retries(step_type, file_path, file_id, params, job_step, db, log):
     """
     Runs a single step, retrying only on transient errors.
+
+    file_id is the FileReference id of the file at `file_path` — recorded on
+    the JobStep so per-step input/output traceability is explicit (each step's
+    input is the previous step's output, but storing it directly means a single
+    JOIN answers "which file did this step read?" without chaining).
 
     Retries (up to MAX_RETRIES, with exponential backoff) are attempted only for
     RETRYABLE_EXCEPTIONS — transient OS/I/O problems. Deterministic failures
@@ -225,8 +240,9 @@ def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
 
     # Record the real start once so duration spans all attempts, not just the
     # last one. (Previously started_at was overwritten on every retry.)
-    job_step.status     = "RUNNING"
-    job_step.started_at = datetime.utcnow()
+    job_step.status        = "RUNNING"
+    job_step.started_at    = datetime.utcnow()
+    job_step.input_file_id = file_id
     db.commit()
 
     last_error = None
@@ -248,7 +264,16 @@ def _run_step_with_retries(step_type, file_path, params, job_step, db, log):
             job_step.duration     = (
                 job_step.completed_at - job_step.started_at
             ).total_seconds()
-            job_step.output_file_id = _save_file_reference(db, output_path).id
+
+            # Only create a new FileReference if the step actually produced a
+            # new file on disk. validate returns its input unchanged — reusing
+            # the input's FileReference avoids cluttering the DB with rows
+            # that share storage_path with the input. (We have file_id passed
+            # in, so this is now a direct assignment — no lookup needed.)
+            if output_path == file_path:
+                job_step.output_file_id = file_id
+            else:
+                job_step.output_file_id = _save_file_reference(db, output_path).id
 
             # Record row counts if the step produced them (transform, convert).
             # NULL for non-row steps so the API can show "-" instead of "0".
@@ -394,8 +419,15 @@ def _save_file_reference(db, file_path: str) -> FileReference:
     """
     Creates a FileReference record for a file on disk.
     Used to track intermediate and output files.
+
+    Retention is read from RETENTION_HOURS at call time (same env var the
+    upload API uses). Reading it here rather than at module import means
+    docker-compose / env changes take effect on the next file save without
+    needing a worker restart.
     """
     from datetime import timedelta
+
+    retention_hours = int(os.getenv("RETENTION_HOURS", "24"))
 
     size     = os.path.getsize(file_path)
     filename = os.path.basename(file_path)
@@ -417,7 +449,7 @@ def _save_file_reference(db, file_path: str) -> FileReference:
         size              = size,
         content_type      = content_type,
         created_at        = datetime.utcnow(),
-        expires_at        = datetime.utcnow() + timedelta(hours=24)
+        expires_at        = datetime.utcnow() + timedelta(hours=retention_hours)
     )
     db.add(file_ref)
     db.commit()
@@ -462,8 +494,11 @@ def _cleanup_intermediate_files(job_id: str, db, log):
                 os.remove(file_ref.storage_path)
                 log.info(f"Deleted intermediate file: {file_ref.storage_path}")
 
-            # Delete DB record
-            db.delete(file_ref)
+            # Soft delete only — same pattern as the expiry sweep (DECISIONS §4).
+            # Hard delete would orphan JobStep.input_file_id / output_file_id
+            # references that point at this row, breaking per-step traceability
+            # in dump_db.sh and audit queries.
+            file_ref.deleted_at = datetime.utcnow()
 
         db.commit()
         log.info(f"Intermediate cleanup complete for job {job_id}")

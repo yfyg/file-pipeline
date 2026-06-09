@@ -71,10 +71,14 @@ def notify(job_id: str, output_file_path: str, params: dict):
     # SSRF protection — block internal/private/metadata hosts
     _validate_webhook_host(webhook_url)
 
+    # Send an actionable download URL instead of the internal filesystem path.
+    # The receiver can fetch the result via this endpoint; they have no business
+    # knowing our storage layout (info-disclosure) and they couldn't use it
+    # anyway. See DECISIONS §6.
     payload = json.dumps({
-        "job_id":      job_id,
-        "status":      "COMPLETED",
-        "output_file": output_file_path,
+        "job_id":     job_id,
+        "status":     "COMPLETED",
+        "result_url": f"/jobs/{job_id}/result",
     }).encode("utf-8")
 
     last_error = None

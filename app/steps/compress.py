@@ -90,7 +90,12 @@ def _zip_extract(file_path: str) -> str:
         if not names:
             raise ValueError("Zip archive is empty")
 
-        target = names[0]
+        # Skip directory entries (names ending in /). A zip can list a
+        # directory as its first entry, which would make output_path end in
+        # "/" and cause a confusing FileNotFoundError on the open() below.
+        target = next((n for n in names if not n.endswith("/")), None)
+        if target is None:
+            raise ValueError("Zip archive contains no regular files")
 
         # Resolve the full output path
         output_path = os.path.realpath(os.path.join(output_dir, target))

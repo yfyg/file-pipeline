@@ -130,6 +130,49 @@ def test_result_download(client):
     assert response.status_code == 404
 
 
+def test_job_step_input_output_file_chain(client, app_modules):
+    """
+    Per-step traceability: each JobStep records both its input_file_id and
+    output_file_id, and step N's input_file_id equals step N-1's
+    output_file_id (the chain is explicit, not implicit).
+
+    Spec calls out "Input file reference" and "Output file reference" on the
+    JobStep data model — this test locks in that both are populated.
+    """
+    pipeline = [
+        {"step": "validate", "params": {"expected_type": "csv"}},
+        {"step": "transform","params": {"select_columns": ["name", "email"]}},
+        {"step": "convert",  "params": {"output_format": "json"}},
+    ]
+    job_id = upload_file(client, SIMPLE_CSV, "data.csv", pipeline).json()["job_id"]
+    wait_for_status(client, job_id, expected_statuses=("COMPLETED",))
+
+    db = app_modules.SessionLocal()
+    try:
+        steps = db.query(app_modules.JobStep).filter(
+            app_modules.JobStep.job_id == job_id
+        ).order_by(app_modules.JobStep.step_index).all()
+
+        # Step 0 (validate): input_file_id is the upload, output is the SAME
+        # row (validate doesn't transform the file)
+        assert steps[0].input_file_id  is not None
+        assert steps[0].output_file_id is not None
+        assert steps[0].input_file_id == steps[0].output_file_id
+
+        # Step N's input must equal Step N-1's output — the chain is explicit
+        for prev, curr in zip(steps, steps[1:]):
+            assert curr.input_file_id == prev.output_file_id, (
+                f"chain broken between {prev.step_type} and {curr.step_type}"
+            )
+
+        # Transform and convert each produce a NEW FileReference (different
+        # from their input), because they write a new file to disk
+        assert steps[1].output_file_id != steps[1].input_file_id  # transform
+        assert steps[2].output_file_id != steps[2].input_file_id  # convert
+    finally:
+        db.close()
+
+
 def test_no_dedup_same_file_multiple_uploads(client, app_modules):
     """
     Upload the same file 3 times → 3 distinct job_ids, each runs independently.

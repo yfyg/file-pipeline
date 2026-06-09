@@ -158,8 +158,17 @@ async def upload_file(
             )
             db.add(step)
 
-        # Step 8 — Enqueue job BEFORE committing
-        # If enqueue fails we roll back DB — file stays but job is not created
+        # Step 8 — Commit FIRST, then enqueue.
+        # If we enqueued first, a fast worker could pick up the job and query
+        # the DB before this transaction is visible — see "Job not found" then
+        # silently return. By committing first, the worker is guaranteed to
+        # see the Job row whenever it picks the message up.
+        # If enqueue fails after commit, the Job row sits in PENDING and the
+        # startup / status-query sweepers re-enqueue it. That is recoverable;
+        # silent worker-side data loss is not.
+        db.commit()
+        log.info(f"Job persisted: {job.id}")
+
         try:
             job_queue.enqueue(
                 "app.workers.processor.process_job",
@@ -167,13 +176,15 @@ async def upload_file(
                 job_timeout = 3600  # 1 hour max per job
             )
         except Exception as e:
+            # Job row stays in PENDING and will be re-enqueued by the sweeper.
+            # We still surface the 500 so the caller knows the request didn't
+            # fully succeed in this round-trip.
+            log.error(f"Enqueue failed for {job.id}; job will be retried by sweeper: {str(e)}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to enqueue job: {str(e)}"
             )
 
-        # Step 9 — Commit everything together
-        db.commit()
         log.info(f"Job created and enqueued: {job.id}")
 
         return {

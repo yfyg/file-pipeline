@@ -9,3 +9,7 @@ storage/outputs/*
 *.db
 .DS_Store
 .idea/
+
+# Personal notes — kept locally, not committed
+INTERVIEW_PREP.md
+REVIEW_NOTES.md

@@ -132,7 +132,17 @@ def _transform_json(file_path: str, params: dict) -> str:
 
 
 def _apply_filter(value: str, filter_params: dict) -> bool:
-    """Returns True if row should be KEPT"""
+    """
+    Returns True if the row should be KEPT, False if it should be dropped.
+
+    Non-numeric values with a numeric filter (`gt` / `lt`) are dropped, not
+    kept. The user asked for a numeric comparison; a value we can't parse
+    cannot satisfy it, so the safe default is to drop. Matches SQL semantics:
+    `WHERE age > 50` against a NULL or non-numeric cell drops the row.
+
+    `eq` works with either numeric or string compare, so it's allowed in the
+    non-numeric branch.
+    """
     try:
         num = float(value)
         if "gt" in filter_params and num <= float(filter_params["gt"]):
@@ -142,6 +152,9 @@ def _apply_filter(value: str, filter_params: dict) -> bool:
         if "eq" in filter_params and num != float(filter_params["eq"]):
             return False
     except ValueError:
+        # Value isn't numeric. gt/lt cannot be evaluated → drop the row.
+        if "gt" in filter_params or "lt" in filter_params:
+            return False
         if "eq" in filter_params and value != filter_params["eq"]:
             return False
     return True
