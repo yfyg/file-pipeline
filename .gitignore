@@ -10,6 +10,9 @@ storage/outputs/*
 .DS_Store
 .idea/
 
+# Stray result file from `curl -O .../jobs/{id}/result` — keeps reappearing
+/result
+
 # Personal notes — kept locally, not committed
 INTERVIEW_PREP.md
 REVIEW_NOTES.md
