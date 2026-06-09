@@ -178,7 +178,7 @@ def process_job(job_id: str):
             return
 
         # All steps completed — handle notify if present
-        _run_notify_if_present(db, job, pipeline, current_file_path, log)
+        _run_notify_if_present(db, job, pipeline, current_file_path, current_file_id, log)
 
         # Move final output file to outputs/ folder
         import shutil
@@ -289,7 +289,7 @@ def _run_step_with_retries(step_type, file_path, file_id, params, job_step, db, 
             is_retryable = isinstance(e, RETRYABLE_EXCEPTIONS)
 
             if is_retryable and attempt < MAX_RETRIES:
-                wait = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
+                wait = 2 ** attempt  # exponential backoff between attempts: 2s, 4s (no sleep after the last)
                 log.warning(f"Attempt {attempt} failed (transient): {last_error} — retrying in {wait}s")
                 time.sleep(wait)
                 continue
@@ -310,10 +310,15 @@ def _run_step_with_retries(step_type, file_path, file_id, params, job_step, db, 
     return False, None, last_error
 
 
-def _run_notify_if_present(db, job, pipeline, final_file_path, log):
+def _run_notify_if_present(db, job, pipeline, final_file_path, final_file_id, log):
     """
     Runs the notify step if defined in the pipeline.
     Webhook failure does NOT fail the job.
+
+    Notify is a side-effect step (POSTs a webhook); it doesn't produce a new
+    file. We record `final_file_id` as both `input_file_id` and `output_file_id`
+    so the per-step traceability chain stays consistent — every JobStep has
+    its file references, including the notify step.
     """
     notify_steps = [
         (i, s) for i, s in enumerate(pipeline)
@@ -332,8 +337,10 @@ def _run_notify_if_present(db, job, pipeline, final_file_path, log):
 
         # Reuse the JobStep created at upload time — do NOT insert a duplicate.
         job_step = _get_or_create_step(db, job.id, index, "notify", params)
-        job_step.status     = "RUNNING"
-        job_step.started_at = datetime.utcnow()
+        job_step.status         = "RUNNING"
+        job_step.started_at     = datetime.utcnow()
+        job_step.input_file_id  = final_file_id   # the file referenced by the webhook
+        job_step.output_file_id = final_file_id   # notify produces no new file
         db.commit()
 
         try:
@@ -347,6 +354,10 @@ def _run_notify_if_present(db, job, pipeline, final_file_path, log):
             job_step.error_message = str(e)
             job_step.completed_at  = datetime.utcnow()
             log.warning(f"Notify step failed (job still completed): {str(e)}")
+
+        # Duration spans started_at → completed_at regardless of success/failure
+        if job_step.started_at and job_step.completed_at:
+            job_step.duration = (job_step.completed_at - job_step.started_at).total_seconds()
 
         db.commit()
 

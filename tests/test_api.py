@@ -173,6 +173,51 @@ def test_job_step_input_output_file_chain(client, app_modules):
         db.close()
 
 
+def test_notify_step_has_file_traceability_and_duration(client, app_modules, monkeypatch):
+    """
+    Notify is a side-effect step (POSTs a webhook). It still records
+    input_file_id and output_file_id (both = the final output file) plus a
+    duration. Locks in the fix that closed the per-step traceability gap on
+    the notify path.
+    """
+    # Patch urlopen and DNS so notify actually executes (no real HTTP, no SSRF)
+    from unittest.mock import MagicMock
+    import importlib
+    notify_mod = importlib.import_module("app.steps.notify")
+
+    fake_response = MagicMock()
+    fake_response.__enter__ = MagicMock(return_value=MagicMock(status=200))
+    fake_response.__exit__  = MagicMock(return_value=False)
+    monkeypatch.setattr(notify_mod.urllib.request, "urlopen", lambda *a, **kw: fake_response)
+    monkeypatch.setattr(notify_mod.socket, "gethostbyname", lambda h: "8.8.8.8")
+
+    pipeline = [
+        {"step": "validate", "params": {"expected_type": "csv"}},
+        {"step": "convert",  "params": {"output_format": "json"}},
+        {"step": "notify",   "params": {"webhook_url": "https://example.com/hook"}},
+    ]
+    job_id = upload_file(client, SIMPLE_CSV, "data.csv", pipeline).json()["job_id"]
+    wait_for_status(client, job_id, expected_statuses=("COMPLETED",))
+
+    db = app_modules.SessionLocal()
+    try:
+        notify_step = db.query(app_modules.JobStep).filter(
+            app_modules.JobStep.job_id    == job_id,
+            app_modules.JobStep.step_type == "notify",
+        ).first()
+        assert notify_step is not None
+        assert notify_step.status == "COMPLETED"
+        # Both file references populated (input == output for a side-effect step)
+        assert notify_step.input_file_id  is not None
+        assert notify_step.output_file_id is not None
+        assert notify_step.input_file_id == notify_step.output_file_id
+        # Duration recorded
+        assert notify_step.duration is not None
+        assert notify_step.duration >= 0
+    finally:
+        db.close()
+
+
 def test_no_dedup_same_file_multiple_uploads(client, app_modules):
     """
     Upload the same file 3 times → 3 distinct job_ids, each runs independently.

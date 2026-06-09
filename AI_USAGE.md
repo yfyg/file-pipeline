@@ -4,6 +4,9 @@
 
 - **Claude Code (Anthropic, Sonnet)** — Started with this model to review the assignment, prepare the environment, and create the file templates. Later we went over each needed pipeline according to the instructions and coded it together. The cycle was like this: model to create the code, me to ask questions related to the content and implementation, questions to make sure requirements were fulfilled.
 - **Claude Desktop (Anthropic, Opus 4.7)** — After creating the pipelines and testing a few of them, I gave the code and requirements to this model to review the code. I got a few inputs and suggestions and we had a discussion about what should be fixed and what should be mentioned in the decisions doc in case I didn't want to handle it. We also had a discussion about trade-offs. For some of the fixes I also consulted the Sonnet model to have a second opinion.
+- **Cursor (GPT-5.3-codex)** — used for an extra review pass once the project was mostly stable, mainly to catch things the Claude models might have missed. A few of the items it raised ended up being real fixes.
+
+Sonnet did most of the writing; Opus 4.7 did most of the deeper review and trade-off discussions; Sonnet again as a second opinion when I got stuck between answers; Cursor as a final independent set of eyes.
 
 ---
 
@@ -19,13 +22,11 @@
 
 - **Streaming.** The code did not handle streaming properly at the beginning — for the JSON file, it was reading the entire file. Also, when checking if the file is not corrupted, we decided to take a small portion of the file for an initial check.
 - **Duplication.** We had a long journey with the duplication issue. I first asked the model whether it had implemented deduplication; since it had not, we decided to implement it on both file name and file content. It was not working properly: deleted files were still saved in the DB and were not processed. Then I understood that since the same file can have different processing events, it will result in different outputs. As I wrote in the decisions doc, I decided to skip deduplication for now, while I can suggest a different solution if needed.
-- **CSV validation crashing on header-only files.** The corruption check used
-  `next(reader)` which raises `StopIteration` on an empty / header-only CSV,
-  then got caught and reported as "File appears corrupted" — the wrong error
-  message for a valid input. Fixed by switching to `next(reader, None)` and
-  explicitly handling the empty case.
-- json code did not apply filtering - came up in tests
-- Using unique id for job and another one for the output file, while it make sense to use same ids
+- **CSV validation crashing on header-only files.** A CSV with just a header (no data rows) is valid, but the corruption check treated it as broken and rejected it. Wrong error for a perfectly fine input.
+- **JSON code did not apply filtering** — came up in tests. The transform step's CSV path handled `filter_rows`, but the JSON path quietly ignored it. Every row passed through. Caught only after I started writing the test with a known expected row count.
+- **Using a unique id for the job and another one for the output file** — it made more sense to use the same id, so the file on disk, the Job row, and the API response all share one UUID.
+- **Commit before enqueue.** The first version enqueued the job to Redis *before* the DB commit. Under load, a fast worker could pick up the message and look up the Job row before the upload's transaction committed — see "Job not found", silently exit, file orphaned. The independent review caught it. Switched to commit-then-enqueue, with a sweeper that re-enqueues stuck PENDING jobs if the enqueue itself fails. Classic "looks fine in tests, breaks under real concurrency" bug.
+- **Worker's exception handler crashing on its own error path.** If the very first DB lookup at the start of the worker failed, the exception handler referenced a variable that was never set — so the handler itself crashed and the real error was lost. One-line fix (initialize the variable before the try block), but the kind of subtle thing AI happily writes and tests don't catch unless you exercise the early-failure path.
 
 ---
 

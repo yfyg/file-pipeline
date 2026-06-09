@@ -65,9 +65,13 @@ def app_modules(temp_workspace, monkeypatch):
     Base.metadata.create_all(bind=engine)
 
     # Patch enqueue to record (func, job_id) pairs instead of running inline.
-    # We can't run synchronously inside enqueue because upload.py enqueues
-    # BEFORE committing (so the worker session would see no Job row yet).
-    # Pending jobs are drained by the upload_file() helper after each request.
+    # We defer execution until AFTER the upload request returns, so that:
+    #   (1) the upload's DB transaction has committed and closed, and
+    #   (2) the worker's separate SessionLocal() will see the committed Job.
+    # Running inline would tangle the upload's open transaction with the
+    # worker's session and break the test's isolation. The real production
+    # code commits before enqueue (DECISIONS §14) — this deferral mirrors
+    # the same ordering invariant in a test-only way.
     pending = []
 
     def _record_enqueue(func_path, job_id, **kwargs):

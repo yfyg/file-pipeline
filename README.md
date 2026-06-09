@@ -7,7 +7,7 @@ Redis + RQ, and SQLite.
 - **5 step types:** validate, transform, convert, compress, notify
 - **Streaming end-to-end** — never loads a full file into memory (tested up
   to 90MB / 1.45M rows)
-- **38 pytest tests** — run in-process, no Docker / Redis required
+- **39 pytest tests** (38 fast + 1 slow) — run in-process, no Docker / Redis required
 - **Stuck-job recovery** — PENDING jobs auto-re-enqueued on startup and on
   every status query
 - **Security:** path-traversal sanitization, Zip Slip protection, SSRF guard
@@ -48,7 +48,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Fast suite (37 tests, ~2 seconds)
+# Fast suite (39 tests, ~2 seconds)
 pytest tests/ -v
 
 # Include the slow large-file test (~30 seconds total)
@@ -217,13 +217,15 @@ file-pipeline/
 │   │   ├── processor.py     # Pipeline orchestrator + retry policy
 │   │   └── sweeper.py       # Stuck-job recovery (PENDING re-enqueue, PROCESSING fail)
 │   └── main.py              # FastAPI app, startup hooks, /health
-├── tests/                   # 38 pytest tests (32 fast + 1 slow), no Docker needed
+├── tests/                   # 40 pytest tests (39 fast + 1 slow), no Docker needed
 │   ├── conftest.py          # Temp DB + storage per test; synchronous job runner patch
-│   ├── test_api.py          # Upload, status, result download, no-dedup (5)
+│   ├── test_api.py          # Upload, status, result download, no-dedup, file chain (7)
 │   ├── test_cancel.py       # Cancel endpoint behavior (4)
+│   ├── test_health.py       # Deep /health: Redis + DB pings (3)
 │   ├── test_notify.py       # Webhook payload, retries, SSRF (6)
 │   ├── test_pipeline.py     # End-to-end, failure, conversion, compression (5)
 │   ├── test_retry_and_compress.py  # OSError retry policy + gzip/zip edge cases (6)
+│   ├── test_sweeper.py      # Stuck-job recovery (2)
 │   ├── test_transform.py    # Filter behavior (6)
 │   └── test_slow_large_file.py     # 90MB streaming test (1, opt-in via -m slow)
 ├── storage/                 # Bind-mounted into containers

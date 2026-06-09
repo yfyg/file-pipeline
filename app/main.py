@@ -151,16 +151,16 @@ def _cleanup_expired_files():
     try:
         now = datetime.utcnow()
 
-        # Find expired file references
+        # Find expired file references — exclude rows soft-deleted in a
+        # previous sweep so we don't fetch them every startup. Over time the
+        # soft-deleted set grows; pushing the filter into the query keeps
+        # the sweep work proportional to active rows, not total history.
         expired_files = db.query(FileReference).filter(
-            FileReference.expires_at < now
+            FileReference.expires_at < now,
+            FileReference.deleted_at.is_(None),
         ).all()
 
         for file_ref in expired_files:
-            # Skip rows we already soft-deleted in a previous sweep
-            if file_ref.deleted_at is not None:
-                continue
-
             # Delete from disk
             if os.path.exists(file_ref.storage_path):
                 try:

@@ -211,6 +211,13 @@ We deliberately don't send `storage/outputs/abc123_data.json.gz` —
 that's info disclosure (leaks our storage layout) and the receiver can't
 GET an internal path anyway.
 
+**`result_url` is path-only by design.** The receiver gets `/jobs/{id}/result`,
+not `https://api.example.com/jobs/{id}/result`. Production would either add
+a `SERVICE_BASE_URL` env var that's prepended here, or expect the receiver
+to know the base URL out-of-band (typically from API onboarding). We chose
+path-only because the service base URL varies by deployment and embedding
+it in the worker requires extra configuration the assignment doesn't have.
+
 **SSRF protection** (`_validate_webhook_host`): before issuing any
 request, we reject schemes other than `http(s)://`, reject `localhost`,
 resolve the host with `socket.gethostbyname`, and reject if the resolved
@@ -421,6 +428,16 @@ sweeper recovers — strictly better than silent loss.
 Runs in **two places**: on service startup (catches Redis-was-down case)
 AND on every `GET /jobs/{id}` (a user polling for status self-heals their
 own stuck job — no separate scheduler needed).
+
+**"Re-enqueue" is safe but not strictly idempotent.** A user polling
+`GET /jobs/{id}` while their job is stuck will trigger a re-enqueue on
+every poll past the 5-minute threshold. Functionally this is safe — the
+worker's `status == PENDING` check is the at-most-once guard, so only the
+first worker to pick up any of the queued messages actually runs the job;
+the rest no-op out. The queue is briefly polluted with duplicate
+messages, but no work is duplicated. Production would add a
+"re-enqueued_at" timestamp on the Job and skip re-enqueue if it's recent;
+we judged that not worth the extra column at this scale.
 
 **Orphan files at startup:**
 - `tmp_*` in `uploads/` → deleted (never recoverable).
